@@ -1,10 +1,9 @@
 #!/bin/bash
-set -euo pipefail  # 开启严格模式：遇到错误立即退出、未定义变量报错、管道失败整体报错
+set -euo pipefail  # 严格模式：错误立即退出、未定义变量报错、管道失败整体报错
 
 # ===================== 基础配置 =====================
-
 # 定义颜色（兼容无终端场景）
-if [ -t 1 ]; then  # 判断是否为交互式终端
+if [ -t 1 ]; then
     CYAN='\033[0;36m'
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -18,33 +17,41 @@ else
     NC=''
 fi
 
-# 定义关键变量（便于维护）
+# 关键变量（便于维护）
 GPG_KEY_URL="https://sing-box.app/gpg.key"
 GPG_KEY_PATH="/etc/apt/keyrings/sagernet.asc"
 SOURCES_FILE="/etc/apt/sources.list.d/sagernet.sources"
 SING_BOX_USER="sing-box"
 
 # ===================== 工具函数 =====================
-
-# 日志输出函数
 log_info() {
     echo -e "${CYAN}[INFO] $1${NC}"
 }
+
 log_success() {
     echo -e "${GREEN}[SUCCESS] $1${NC}"
 }
+
 log_warn() {
     echo -e "${YELLOW}[WARN] $1${NC}"
 }
+
 log_error() {
     echo -e "${RED}[ERROR] $1${NC}"
-    exit 1  # 错误退出
+    exit 1
 }
 
-# 检查是否有 sudo 权限
+# 检查sudo权限
 check_sudo() {
     if ! sudo -v >/dev/null 2>&1; then
-        log_error "当前用户无 sudo 权限，请使用 root 或有 sudo 权限的用户执行脚本"
+        log_error "当前用户无sudo权限，请使用root或有sudo权限的用户执行"
+    fi
+}
+
+# 检查apt环境
+check_apt() {
+    if ! command -v apt >/dev/null 2>&1; then
+        log_error "仅支持Debian/Ubuntu系统（apt包管理器）"
     fi
 }
 
@@ -52,73 +59,77 @@ check_sudo() {
 check_network() {
     log_info "检查网络连通性..."
     if ! curl -fsSL --max-time 10 "$GPG_KEY_URL" >/dev/null 2>&1; then
-        log_error "无法访问 sing-box 官方服务器，请检查网络或代理配置"
-    fi
-}
-
-# 检查 apt 环境
-check_apt() {
-    if ! command -v apt >/dev/null 2>&1; then
-        log_error "当前系统不支持 apt 包管理器，仅支持 Debian/Ubuntu 系统"
+        log_error "无法访问sing-box官方服务器，请检查网络/代理"
     fi
 }
 
 # ===================== 核心逻辑 =====================
-
-# 前置检查
 main() {
-    log_info "===== 开始执行 sing-box 安装脚本 ====="
+    log_info "===== 开始安装sing-box ====="
+    
+    # 前置检查
     check_sudo
     check_apt
     check_network
 
-    # 检查 sing-box 是否已安装
+    # 检查是否已安装
     if command -v sing-box >/dev/null 2>&1; then
-        sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-        log_success "sing-box 已安装，当前版本：$sing_box_version，跳过安装步骤"
+        local version
+        version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
+        log_success "sing-box已安装，版本：$version，跳过安装"
         exit 0
     fi
 
-    # 1. 添加 GPG 密钥（避免重复添加）
-    log_info "添加 sing-box 官方 GPG 密钥..."
+    # 1. 安装GPG密钥
+    log_info "添加GPG密钥..."
     sudo mkdir -p /etc/apt/keyrings
     if [ ! -f "$GPG_KEY_PATH" ]; then
-        sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH" || log_error "GPG 密钥下载失败"
+        if ! sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH"; then
+            log_error "GPG密钥下载失败"
+        fi
         sudo chmod a+r "$GPG_KEY_PATH"
     else
-        log_warn "GPG 密钥已存在，跳过下载"
+        log_warn "GPG密钥已存在，跳过"
     fi
 
-    # 2. 添加 apt 源（避免重复添加）
-    log_info "配置 sing-box apt 源..."
+    # 2. 配置apt源
+    log_info "配置apt源..."
     if [ ! -f "$SOURCES_FILE" ]; then
-        echo "Types: deb
+        cat << 'EOF' | sudo tee "$SOURCES_FILE" >/dev/null
+Types: deb
 URIs: https://deb.sagernet.org/
 Suites: *
 Components: *
 Enabled: yes
-Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "apt 源配置文件写入失败"
+Signed-By: /etc/apt/keyrings/sagernet.asc
+EOF
+        if [ $? -ne 0 ]; then
+            log_error "apt源文件写入失败"
+        fi
     else
-        log_warn "apt 源配置文件已存在，跳过创建"
+        log_warn "apt源文件已存在，跳过"
     fi
 
-    # 3. 更新包列表（保留关键输出，便于排查）
-    log_info "更新 apt 包列表..."
-    sudo apt-get update -qq || log_error "apt 包列表更新失败，请检查源配置"
+    # 3. 更新包列表
+    log_info "更新apt包列表..."
+    if ! sudo apt-get update -qq; then
+        log_error "apt包列表更新失败"
+    fi
 
-    # 4. 选择安装版本（增加默认值，超时自动选稳定版）
-    log_info "请选择安装版本（默认 10 秒后自动选择稳定版）"
-    read -rp "1: 稳定版 | 2: 测试版 (输入 1/2，回车确认): " -t 10 version_choice
-    version_choice=${version_choice:-1}  # 默认选1
+    # 4. 选择安装版本
+    log_info "请选择安装版本（10秒后默认选稳定版）"
+    read -rp "1:稳定版 | 2:测试版 (输入1/2回车): " -t 10 version_choice
+    version_choice=${version_choice:-1}
 
-    case $version_choice in
+    local pkg_name
+    case "$version_choice" in
         1)
             pkg_name="sing-box"
-            log_info "开始安装 sing-box 稳定版..."
+            log_info "安装稳定版..."
             ;;
         2)
             pkg_name="sing-box-beta"
-            log_info "开始安装 sing-box 测试版..."
+            log_info "安装测试版..."
             ;;
         *)
             log_warn "无效选择，默认安装稳定版"
@@ -126,198 +137,40 @@ Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "ap
             ;;
     esac
 
-    # 5. 安装包（保留错误输出，不静默到底）
-    sudo apt-get install -y "$pkg_name" || log_error "$pkg_name 安装失败，请检查 apt 日志（/var/log/apt/term.log）"
+    # 5. 安装包
+    if ! sudo apt-get install -y "$pkg_name"; then
+        log_error "$pkg_name安装失败，查看日志：/var/log/apt/term.log"
+    fi
 
     # 6. 验证安装
     if ! command -v sing-box >/dev/null 2>&1; then
-        log_error "sing-box 安装后未检测到可执行文件，安装失败"
+        log_error "安装后未检测到sing-box可执行文件"
     fi
-    sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-    log_success "sing-box 安装成功，版本：$sing_box_version"
+    local final_version
+    final_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
+    log_success "sing-box安装成功，版本：$final_version"
 
-    # 7. 创建系统用户并设置权限（严谨判断）
-    log_info "配置 sing-box 权限..."
+    # 7. 配置用户和权限
+    log_info "配置权限..."
     if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
         sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
-        log_info "已创建 $SING_BOX_USER 系统用户"
+        log_info "创建$SING_BOX_USER系统用户"
     else
-        log_warn "$SING_BOX_USER 用户已存在，跳过创建"
+        log_warn "$SING_BOX_USER用户已存在，跳过"
     fi
 
-    # 创建目录并设置权限（先判断目录是否存在）
-    for dir in /var/lib/sing-box /etc/sing-box; do
-        if [ ! -d "$dir" ]; t#!/bin/bash
-set -euo pipefail  # 开启严格模式：遇到错误立即退出、未定义变量报错、管道失败整体报错
-
-# ===================== 基础配置 =====================
-
-# 定义颜色（兼容无终端场景）
-if [ -t 1 ]; then  # 判断是否为交互式终端
-    CYAN='\033[0;36m'
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    NC='\033[0m'
-else
-    CYAN=''
-    RED=''
-    GREEN=''
-    YELLOW=''
-    NC=''
-fi
-
-# 定义关键变量（便于维护）
-GPG_KEY_URL="https://sing-box.app/gpg.key"
-GPG_KEY_PATH="/etc/apt/keyrings/sagernet.asc"
-SOURCES_FILE="/etc/apt/sources.list.d/sagernet.sources"
-SING_BOX_USER="sing-box"
-
-# ===================== 工具函数 =====================
-
-# 日志输出函数
-log_info() {
-    echo -e "${CYAN}[INFO] $1${NC}"
-}
-log_success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
-}
-log_warn() {
-    echo -e "${YELLOW}[WARN] $1${NC}"
-}
-log_error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-    exit 1  # 错误退出
-}
-
-# 检查是否有 sudo 权限
-check_sudo() {
-    if ! sudo -v >/dev/null 2>&1; then
-        log_error "当前用户无 sudo 权限，请使用 root 或有 sudo 权限的用户执行脚本"
-    fi
-}
-
-# 检查网络连通性
-check_network() {
-    log_info "检查网络连通性..."
-    if ! curl -fsSL --max-time 10 "$GPG_KEY_URL" >/dev/null 2>&1; then
-        log_error "无法访问 sing-box 官方服务器，请检查网络或代理配置"
-    fi
-}
-
-# 检查 apt 环境
-check_apt() {
-    if ! command -v apt >/dev/null 2>&1; then
-        log_error "当前系统不支持 apt 包管理器，仅支持 Debian/Ubuntu 系统"
-    fi
-}
-
-# ===================== 核心逻辑 =====================
-
-# 前置检查
-main() {
-    log_info "===== 开始执行 sing-box 安装脚本 ====="
-    check_sudo
-    check_apt
-    check_network
-
-    # 检查 sing-box 是否已安装
-    if command -v sing-box >/dev/null 2>&1; then
-        sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-        log_success "sing-box 已安装，当前版本：$sing_box_version，跳过安装步骤"
-        exit 0
-    fi
-
-    # 1. 添加 GPG 密钥（避免重复添加）
-    log_info "添加 sing-box 官方 GPG 密钥..."
-    sudo mkdir -p /etc/apt/keyrings
-    if [ ! -f "$GPG_KEY_PATH" ]; then
-        sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH" || log_error "GPG 密钥下载失败"
-        sudo chmod a+r "$GPG_KEY_PATH"
-    else
-        log_warn "GPG 密钥已存在，跳过下载"
-    fi
-
-    # 2. 添加 apt 源（避免重复添加）
-    log_info "配置 sing-box apt 源..."
-    if [ ! -f "$SOURCES_FILE" ]; then
-        echo "Types: deb
-URIs: https://deb.sagernet.org/
-Suites: *
-Components: *
-Enabled: yes
-Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "apt 源配置文件写入失败"
-    else
-        log_warn "apt 源配置文件已存在，跳过创建"
-    fi
-
-    # 3. 更新包列表（保留关键输出，便于排查）
-    log_info "更新 apt 包列表..."
-    sudo apt-get update -qq || log_error "apt 包列表更新失败，请检查源配置"
-
-    # 4. 选择安装版本（增加默认值，超时自动选稳定版）
-    log_info "请选择安装版本（默认 10 秒后自动选择稳定版）"
-    read -rp "1: 稳定版 | 2: 测试版 (输入 1/2，回车确认): " -t 10 version_choice
-    version_choice=${version_choice:-1}  # 默认选1
-
-    case $version_choice in
-        1)
-            pkg_name="sing-box"
-            log_info "开始安装 sing-box 稳定版..."
-            ;;
-        2)
-            pkg_name="sing-box-beta"
-            log_info "开始安装 sing-box 测试版..."
-            ;;
-        *)
-            log_warn "无效选择，默认安装稳定版"
-            pkg_name="sing-box"
-            ;;
-    esac
-
-    # 5. 安装包（保留错误输出，不静默到底）
-    sudo apt-get install -y "$pkg_name" || log_error "$pkg_name 安装失败，请检查 apt 日志（/var/log/apt/term.log）"
-
-    # 6. 验证安装
-    if ! command -v sing-box >/dev/null 2>&1; then
-        log_error "sing-box 安装后未检测到可执行文件，安装失败"
-    fi
-    sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-    log_success "sing-box 安装成功，版本：$sing_box_version"
-
-    # 7. 创建系统用户并设置权限（严谨判断）
-    log_info "配置 sing-box 权限..."
-    if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
-        sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
-        log_info "已创建 $SING_BOX_USER 系统用户"
-    else
-        log_warn "$SING_BOX_USER 用户已存在，跳过创建"
-    fi
-
-    # 创建目录并设置权限（先判断目录是否存在）
-    for dir in /var/lib/sing-box /etc/sing-box; do
+    # 创建目录并设置权限
+    local dirs=("/var/lib/sing-box" "/etc/sing-box")
+    for dir in "${dirs[@]}"; do
         if [ ! -d "$dir" ]; then
             sudo mkdir -p "$dir"
-            log_info "已创建目录：$dir"
+            log_info "创建目录：$dir"
         fi
         sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
-        sudo chmod 700 "$dir"  # 增加权限限制，更安全
+        sudo chmod 700 "$dir"
     done
 
-    log_success "===== sing-box 安装及配置完成 ====="
-}
-
-# 执行主函数
-main
-hen
-            sudo mkdir -p "$dir"
-            log_info "已创建目录：$dir"
-        fi
-        sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
-        sudo chmod 700 "$dir"  # 增加权限限制，更安全
-    done
-
-    log_success "===== sing-box 安装及配置完成 ====="
+    log_success "===== sing-box安装配置完成 ====="
 }
 
 # 执行主函数
