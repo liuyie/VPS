@@ -121,4 +121,42 @@ Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "ap
             log_info "开始安装 sing-box 测试版..."
             ;;
         *)
-            log_warn "无效选择_
+            log_warn "无效选择，默认安装稳定版"
+            pkg_name="sing-box"
+            ;;
+    esac
+
+    # 5. 安装包（保留错误输出，不静默到底）
+    sudo apt-get install -y "$pkg_name" || log_error "$pkg_name 安装失败，请检查 apt 日志（/var/log/apt/term.log）"
+
+    # 6. 验证安装
+    if ! command -v sing-box >/dev/null 2>&1; then
+        log_error "sing-box 安装后未检测到可执行文件，安装失败"
+    fi
+    sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
+    log_success "sing-box 安装成功，版本：$sing_box_version"
+
+    # 7. 创建系统用户并设置权限（严谨判断）
+    log_info "配置 sing-box 权限..."
+    if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
+        sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
+        log_info "已创建 $SING_BOX_USER 系统用户"
+    else
+        log_warn "$SING_BOX_USER 用户已存在，跳过创建"
+    fi
+
+    # 创建目录并设置权限（先判断目录是否存在）
+    for dir in /var/lib/sing-box /etc/sing-box; do
+        if [ ! -d "$dir" ]; then
+            sudo mkdir -p "$dir"
+            log_info "已创建目录：$dir"
+        fi
+        sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
+        sudo chmod 700 "$dir"  # 增加权限限制，更安全
+    done
+
+    log_success "===== sing-box 安装及配置完成 ====="
+}
+
+# 执行主函数
+main
