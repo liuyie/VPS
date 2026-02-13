@@ -1,162 +1,174 @@
 #!/bin/bash
-set -euo pipefail  # 开启严格模式：遇到错误立即退出、未定义变量报错、管道失败整体报错
+set -e
 
-# ===================== 基础配置 =====================
+CONFIG_DIR="/etc/sing-box"
+CONFIG_FILE="${CONFIG_DIR}/config.json"
 
-# 定义颜色（兼容无终端场景）
-if [ -t 1 ]; then  # 判断是否为交互式终端
-    CYAN='\033[0;36m'
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    NC='\033[0m'
-else
-    CYAN=''
-    RED=''
-    GREEN=''
-    YELLOW=''
-    NC=''
+echo "=============================="
+echo " sing-box Ultimate Auto Install"
+echo "=============================="
+
+# 1️⃣ 安装依赖
+apt update -y
+apt install -y curl openssl jq uuid-runtime
+
+# 2️⃣ 安装 sing-box 稳定版
+bash <(curl -fsSL https://sing-box.app/install.sh)
+
+mkdir -p ${CONFIG_DIR}
+
+# 3️⃣ 随机生成参数
+
+UUID=$(uuidgen)
+
+# 随机 short_id
+SHORT_ID=$(openssl rand -hex 4)
+
+# 生成 Reality 密钥
+KEY_PAIR=$(sing-box generate reality-keypair)
+PRIVATE_KEY=$(echo "$KEY_PAIR" | grep PrivateKey | awk '{print $2}')
+PUBLIC_KEY=$(echo "$KEY_PAIR" | grep PublicKey | awk '{print $2}')
+
+# 随机 Hysteria 混淆密码
+HY2_OBFS_PASS=$(openssl rand -hex 8)
+
+# 随机混淆算法
+OBFS_LIST=("salamander" "none")
+HY2_OBFS=${OBFS_LIST[$RANDOM % ${#OBFS_LIST[@]}]}
+
+# 4️⃣ 自动选择伪装域名
+FAKE_DOMAINS=(
+"www.cloudflare.com"
+"www.microsoft.com"
+"www.apple.com"
+"www.amazon.com"
+)
+
+echo ""
+echo "可用伪装域名："
+for i in "${!FAKE_DOMAINS[@]}"; do
+  echo "$i) ${FAKE_DOMAINS[$i]}"
+done
+
+read -p "选择伪装域名编号 (默认0): " INDEX
+INDEX=${INDEX:-0}
+SERVER_NAME=${FAKE_DOMAINS[$INDEX]}
+
+echo "使用伪装域名: $SERVER_NAME"
+
+# 5️⃣ 自动获取证书（使用 acme.sh 示例）
+if [ ! -d "/root/.acme.sh" ]; then
+  curl https://get.acme.sh | sh
 fi
 
-# 定义关键变量（便于维护）
-GPG_KEY_URL="https://sing-box.app/gpg.key"
-GPG_KEY_PATH="/etc/apt/keyrings/sagernet.asc"
-SOURCES_FILE="/etc/apt/sources.list.d/sagernet.sources"
-SING_BOX_USER="sing-box"
+read -p "请输入你的真实域名 (用于证书申请): " REAL_DOMAIN
 
-# ===================== 工具函数 =====================
+~/.acme.sh/acme.sh --issue -d ${REAL_DOMAIN} --standalone
+~/.acme.sh/acme.sh --install-cert -d ${REAL_DOMAIN} \
+--key-file       ${CONFIG_DIR}/key.pem  \
+--fullchain-file ${CONFIG_DIR}/cert.pem
 
-# 日志输出函数
-log_info() {
-    echo -e "${CYAN}[INFO] $1${NC}"
+# 6️⃣ 生成全新格式 config.json
+
+cat > ${CONFIG_FILE} <<EOF
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [
+        {
+          "uuid": "${UUID}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "${SERVER_NAME}",
+            "server_port": 443
+          },
+          "private_key": "${PRIVATE_KEY}",
+          "short_id": ["${SHORT_ID}"]
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2",
+      "listen": "::",
+      "listen_port": 8443,
+      "users": [
+        {
+          "password": "${UUID}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "${CONFIG_DIR}/cert.pem",
+        "key_path": "${CONFIG_DIR}/key.pem"
+      },
+      "obfs": {
+        "type": "${HY2_OBFS}",
+        "password": "${HY2_OBFS_PASS}"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct"
+    }
+  ]
 }
-log_success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
-}
-log_warn() {
-    echo -e "${YELLOW}[WARN] $1${NC}"
-}
-log_error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-    exit 1  # 错误退出
-}
+EOF
 
-# 检查是否有 sudo 权限
-check_sudo() {
-    if ! sudo -v >/dev/null 2>&1; then
-        log_error "当前用户无 sudo 权限，请使用 root 或有 sudo 权限的用户执行脚本"
-    fi
-}
+# 7️⃣ systemd 服务
 
-# 检查网络连通性
-check_network() {
-    log_info "检查网络连通性..."
-    if ! curl -fsSL --max-time 10 "$GPG_KEY_URL" >/dev/null 2>&1; then
-        log_error "无法访问 sing-box 官方服务器，请检查网络或代理配置"
-    fi
-}
+cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+After=network.target
 
-# 检查 apt 环境
-check_apt() {
-    if ! command -v apt >/dev/null 2>&1; then
-        log_error "当前系统不支持 apt 包管理器，仅支持 Debian/Ubuntu 系统"
-    fi
-}
+[Service]
+ExecStart=/usr/local/bin/sing-box run -c ${CONFIG_FILE}
+Restart=always
+User=root
 
-# ===================== 核心逻辑 =====================
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# 前置检查
-main() {
-    log_info "===== 开始执行 sing-box 安装脚本 ====="
-    check_sudo
-    check_apt
-    check_network
+systemctl daemon-reload
+systemctl enable sing-box
+systemctl restart sing-box
 
-    # 检查 sing-box 是否已安装
-    if command -v sing-box >/dev/null 2>&1; then
-        sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-        log_success "sing-box 已安装，当前版本：$sing_box_version，跳过安装步骤"
-        exit 0
-    fi
+IP=$(curl -s ifconfig.me)
 
-    # 1. 添加 GPG 密钥（避免重复添加）
-    log_info "添加 sing-box 官方 GPG 密钥..."
-    sudo mkdir -p /etc/apt/keyrings
-    if [ ! -f "$GPG_KEY_PATH" ]; then
-        sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH" || log_error "GPG 密钥下载失败"
-        sudo chmod a+r "$GPG_KEY_PATH"
-    else
-        log_warn "GPG 密钥已存在，跳过下载"
-    fi
-
-    # 2. 添加 apt 源（避免重复添加）
-    log_info "配置 sing-box apt 源..."
-    if [ ! -f "$SOURCES_FILE" ]; then
-        echo "Types: deb
-URIs: https://deb.sagernet.org/
-Suites: *
-Components: *
-Enabled: yes
-Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "apt 源配置文件写入失败"
-    else
-        log_warn "apt 源配置文件已存在，跳过创建"
-    fi
-
-    # 3. 更新包列表（保留关键输出，便于排查）
-    log_info "更新 apt 包列表..."
-    sudo apt-get update -qq || log_error "apt 包列表更新失败，请检查源配置"
-
-    # 4. 选择安装版本（增加默认值，超时自动选稳定版）
-    log_info "请选择安装版本（默认 10 秒后自动选择稳定版）"
-    read -rp "1: 稳定版 | 2: 测试版 (输入 1/2，回车确认): " -t 10 version_choice
-    version_choice=${version_choice:-1}  # 默认选1
-
-    case $version_choice in
-        1)
-            pkg_name="sing-box"
-            log_info "开始安装 sing-box 稳定版..."
-            ;;
-        2)
-            pkg_name="sing-box-beta"
-            log_info "开始安装 sing-box 测试版..."
-            ;;
-        *)
-            log_warn "无效选择，默认安装稳定版"
-            pkg_name="sing-box"
-            ;;
-    esac
-
-    # 5. 安装包（保留错误输出，不静默到底）
-    sudo apt-get install -y "$pkg_name" || log_error "$pkg_name 安装失败，请检查 apt 日志（/var/log/apt/term.log）"
-
-    # 6. 验证安装
-    if ! command -v sing-box >/dev/null 2>&1; then
-        log_error "sing-box 安装后未检测到可执行文件，安装失败"
-    fi
-    sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-    log_success "sing-box 安装成功，版本：$sing_box_version"
-
-    # 7. 创建系统用户并设置权限（严谨判断）
-    log_info "配置 sing-box 权限..."
-    if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
-        sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
-        log_info "已创建 $SING_BOX_USER 系统用户"
-    else
-        log_warn "$SING_BOX_USER 用户已存在，跳过创建"
-    fi
-
-    # 创建目录并设置权限（先判断目录是否存在）
-    for dir in /var/lib/sing-box /etc/sing-box; do
-        if [ ! -d "$dir" ]; then
-            sudo mkdir -p "$dir"
-            log_info "已创建目录：$dir" 
-        fi
-        sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
-        sudo chmod 700 "$dir"  # 增加权限限制，更安全
-    done
-
-    log_success "===== sing-box 安装及配置完成 ====="
-}
-
-# 执行主函数
-main
+echo ""
+echo "=============================="
+echo "        安装完成"
+echo "=============================="
+echo ""
+echo "VLESS Reality 客户端参数："
+echo "服务器: ${IP}"
+echo "端口: 443"
+echo "UUID: ${UUID}"
+echo "公钥: ${PUBLIC_KEY}"
+echo "short_id: ${SHORT_ID}"
+echo "伪装域名: ${SERVER_NAME}"
+echo ""
+echo "Hysteria2 参数："
+echo "服务器: ${IP}"
+echo "端口: 8443"
+echo "密码: ${UUID}"
+echo "混淆算法: ${HY2_OBFS}"
+echo "混淆密码: ${HY2_OBFS_PASS}"
+echo ""
+echo "sing-box 已启动 ✔"
