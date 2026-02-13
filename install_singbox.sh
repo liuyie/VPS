@@ -149,7 +149,7 @@ Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "ap
     for dir in /var/lib/sing-box /etc/sing-box; do
         if [ ! -d "$dir" ]; then
             sudo mkdir -p "$dir"
-            log_info "已创建目录：$dir"
+            log_info "已创建目录：$dir" 
         fi
         sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
         sudo chmod 700 "$dir"  # 增加权限限制，更安全
