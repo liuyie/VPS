@@ -81,7 +81,7 @@ install_dependencies() {
         exit 1
     fi
 
-    echo -e "${YELLOW}📦 开始安装依赖包...${RESET}"
+    echo -e "${YELLOW}ߓ栥쀥狥ㅤ喥셮..${RESET}"
     for pkg in "${dependencies[@]}"; do
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             if ! dpkg -s "$pkg" &>/dev/null; then
@@ -154,7 +154,7 @@ configure_firewall() {
 # 下载安装 acme.sh
 download_acme() {
     if [ ! -d "$ACME_INSTALL_PATH" ]; then
-        echo -e "${YELLOW}📥 开始安装 acme.sh...${RESET}"
+        echo -e "${YELLOW}ߓ堥쀥狥ㅠacme.sh...${RESET}"
         curl -fsSL https://get.acme.sh | sh -s -- home "$ACME_INSTALL_PATH" || { echo -e "${RED}❌ 错误：下载 acme.sh 失败，请检查网络连接${RESET}" >&2; exit 1; }
         echo -e "${GREEN}✅ acme.sh 下载完成。${RESET}"
     else
@@ -181,7 +181,7 @@ find_acme_cmd() {
 
 # 更新 acme.sh
 update_acme() {
-    echo -e "${YELLOW}🔄 开始更新 acme.sh...${RESET}"
+    echo -e "${YELLOW}ߔ䠥쀥狦봦氠acme.sh...${RESET}"
     "$ACME_CMD" --upgrade >/dev/null 2>&1 || echo -e "${YELLOW}⚠️  警告：acme.sh 更新失败，将使用当前版本${RESET}" >&2
     "$ACME_CMD" --update-account --days 60 >/dev/null 2>&1 || echo -e "${YELLOW}⚠️  警告：acme.sh 账户信息更新失败${RESET}" >/dev/null
     echo -e "${GREEN}✅ acme.sh 更新完成。${RESET}"
@@ -189,7 +189,7 @@ update_acme() {
 
 # 申请 SSL 证书
 issue_cert() {
-    echo -e "${YELLOW}🔍 开始申请 $DOMAIN 证书...${RESET}"
+    echo -e "${YELLOW}ߔ�쀥狧䳨﷠$DOMAIN 证书...${RESET}"
     # 保留详细日志，便于排查问题
     if ! "$ACME_CMD" --issue --standalone -d "$DOMAIN" --server "$CA_SERVER" --force \
         --pre-hook "systemctl stop nginx 2>/dev/null || systemctl stop apache2 2>/dev/null || true" \
@@ -209,7 +209,7 @@ install_cert() {
     CERT_KEY_DIR="/etc/ssl/$DOMAIN"
     mkdir -p "$CERT_KEY_DIR" >/dev/null 2>&1 || { echo -e "${RED}❌ 错误：创建证书目录失败${RESET}" >&2; exit 1; }
 
-    echo -e "${YELLOW}📦 开始安装证书到 $CERT_KEY_DIR...${RESET}"
+    echo -e "${YELLOW}ߓ栥쀥狥ㅨ馥谠$CERT_KEY_DIR...${RESET}"
     if "$ACME_CMD" --installcert -d "$DOMAIN" \
         --key-file       "${CERT_KEY_DIR}/${DOMAIN}.key" \
         --fullchain-file "${CERT_KEY_DIR}/${DOMAIN}.crt" \
