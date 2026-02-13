@@ -1,162 +1,168 @@
 #!/bin/bash
-set -euo pipefail  # 开启严格模式：遇到错误立即退出、未定义变量报错、管道失败整体报错
+set -euo pipefail
 
 # ===================== 基础配置 =====================
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
 
-# 定义颜色（兼容无终端场景）
-if [ -t 1 ]; then  # 判断是否为交互式终端
-    CYAN='\033[0;36m'
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    NC='\033[0m'
-else
-    CYAN=''
-    RED=''
-    GREEN=''
-    YELLOW=''
-    NC=''
-fi
-
-# 定义关键变量（便于维护）
 GPG_KEY_URL="https://sing-box.app/gpg.key"
 GPG_KEY_PATH="/etc/apt/keyrings/sagernet.asc"
 SOURCES_FILE="/etc/apt/sources.list.d/sagernet.sources"
 SING_BOX_USER="sing-box"
+CONFIG_FILE="/etc/sing-box/config.json"
 
-# ===================== 工具函数 =====================
+# ===================== 日志函数 =====================
+log()   { echo -e "${CYAN}[INFO] $1${NC}"; }
+log_success() { echo -e "${GREEN}[SUCCESS] $1${NC}"; }
+log_warn() { echo -e "${YELLOW}[WARN] $1${NC}"; }
+log_error() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
 
-# 日志输出函数
-log_info() {
-    echo -e "${CYAN}[INFO] $1${NC}"
-}
-log_success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
-}
-log_warn() {
-    echo -e "${YELLOW}[WARN] $1${NC}"
-}
-log_error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-    exit 1  # 错误退出
-}
-
-# 检查是否有 sudo 权限
+# ===================== 检查 sudo =====================
 check_sudo() {
     if ! sudo -v >/dev/null 2>&1; then
         log_error "当前用户无 sudo 权限，请使用 root 或有 sudo 权限的用户执行脚本"
     fi
 }
 
-# 检查网络连通性
-check_network() {
-    log_info "检查网络连通性..."
-    if ! curl -fsSL --max-time 10 "$GPG_KEY_URL" >/dev/null 2>&1; then
-        log_error "无法访问 sing-box 官方服务器，请检查网络或代理配置"
+# ===================== 修复主机名解析 =====================
+fix_hostname() {
+    HOSTNAME=$(hostname)
+    if ! grep -q "$HOSTNAME" /etc/hosts; then
+        log_warn "修复主机名解析 /etc/hosts"
+        echo "127.0.0.1 $HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
     fi
 }
 
-# 检查 apt 环境
+# ===================== 网络与 apt =====================
+check_network() {
+    log "检查网络..."
+    if ! curl -fsSL --max-time 10 "$GPG_KEY_URL" >/dev/null 2>&1; then
+        log_error "无法访问 sing-box 官方服务器，请检查网络"
+    fi
+}
+
 check_apt() {
     if ! command -v apt >/dev/null 2>&1; then
         log_error "当前系统不支持 apt 包管理器，仅支持 Debian/Ubuntu 系统"
     fi
 }
 
-# ===================== 核心逻辑 =====================
-
-# 前置检查
-main() {
-    log_info "===== 开始执行 sing-box 安装脚本 ====="
-    check_sudo
-    check_apt
-    check_network
-
-    # 检查 sing-box 是否已安装
-    if command -v sing-box >/dev/null 2>&1; then
-        sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-        log_success "sing-box 已安装，当前版本：$sing_box_version，跳过安装步骤"
-        exit 0
-    fi
-
-    # 1. 添加 GPG 密钥（避免重复添加）
-    log_info "添加 sing-box 官方 GPG 密钥..."
+# ===================== 安装 sing-box =====================
+install_sing_box() {
+    # 添加 GPG Key
     sudo mkdir -p /etc/apt/keyrings
     if [ ! -f "$GPG_KEY_PATH" ]; then
-        sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH" || log_error "GPG 密钥下载失败"
+        log "下载 GPG Key..."
+        sudo curl -fsSL "$GPG_KEY_URL" -o "$GPG_KEY_PATH" || log_error "GPG Key 下载失败"
         sudo chmod a+r "$GPG_KEY_PATH"
-    else
-        log_warn "GPG 密钥已存在，跳过下载"
     fi
 
-    # 2. 添加 apt 源（避免重复添加）
-    log_info "配置 sing-box apt 源..."
+    # 添加 apt 源
     if [ ! -f "$SOURCES_FILE" ]; then
+        log "配置 apt 源..."
         echo "Types: deb
 URIs: https://deb.sagernet.org/
 Suites: *
 Components: *
 Enabled: yes
-Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null || log_error "apt 源配置文件写入失败"
-    else
-        log_warn "apt 源配置文件已存在，跳过创建"
+Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null
     fi
 
-    # 3. 更新包列表（保留关键输出，便于排查）
-    log_info "更新 apt 包列表..."
-    sudo apt-get update -qq || log_error "apt 包列表更新失败，请检查源配置"
-
-    # 4. 选择安装版本（增加默认值，超时自动选稳定版）
-    log_info "请选择安装版本（默认 10 秒后自动选择稳定版）"
-    read -rp "1: 稳定版 | 2: 测试版 (输入 1/2，回车确认): " -t 10 version_choice
-    version_choice=${version_choice:-1}  # 默认选1
-
-    case $version_choice in
-        1)
-            pkg_name="sing-box"
-            log_info "开始安装 sing-box 稳定版..."
-            ;;
-        2)
-            pkg_name="sing-box-beta"
-            log_info "开始安装 sing-box 测试版..."
-            ;;
-        *)
-            log_warn "无效选择，默认安装稳定版"
-            pkg_name="sing-box"
-            ;;
-    esac
-
-    # 5. 安装包（保留错误输出，不静默到底）
-    sudo apt-get install -y "$pkg_name" || log_error "$pkg_name 安装失败，请检查 apt 日志（/var/log/apt/term.log）"
-
-    # 6. 验证安装
-    if ! command -v sing-box >/dev/null 2>&1; then
-        log_error "sing-box 安装后未检测到可执行文件，安装失败"
-    fi
-    sing_box_version=$(sing-box version | grep -oP 'sing-box version \K\S+' || echo "未知版本")
-    log_success "sing-box 安装成功，版本：$sing_box_version"
-
-    # 7. 创建系统用户并设置权限（严谨判断）
-    log_info "配置 sing-box 权限..."
-    if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
-        sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
-        log_info "已创建 $SING_BOX_USER 系统用户"
-    else
-        log_warn "$SING_BOX_USER 用户已存在，跳过创建"
-    fi
-
-    # 创建目录并设置权限（先判断目录是否存在）
-    for dir in /var/lib/sing-box /etc/sing-box; do
-        if [ ! -d "$dir" ]; then
-            sudo mkdir -p "$dir"
-            log_info "已创建目录：$dir"
-        fi
-        sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
-        sudo chmod 700 "$dir"  # 增加权限限制，更安全
-    done
-
-    log_success "===== sing-box 安装及配置完成 ====="
+    # 更新 apt
+    sudo apt-get update -qq
+    # 安装 sing-box
+    sudo apt-get install -y sing-box
 }
 
-# 执行主函数
+# ===================== 创建系统用户 & 目录 =====================
+setup_user_dir() {
+    if ! id "$SING_BOX_USER" >/dev/null 2>&1; then
+        sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SING_BOX_USER"
+    fi
+
+    for dir in /var/lib/sing-box /etc/sing-box; do
+        sudo mkdir -p "$dir"
+        sudo chown -R "$SING_BOX_USER:$SING_BOX_USER" "$dir"
+        sudo chmod 700 "$dir"
+    done
+}
+
+# ===================== 生成 config.json =====================
+generate_config() {
+    log "生成最新 config.json ..."
+    # 随机 UUID
+    UUID=$(sing-box generate uuid)
+    # 随机 short-id
+    SHORTID=$(head /dev/urandom | tr -dc a-f0-9 | head -c 8)
+
+    cat <<EOF | sudo tee "$CONFIG_FILE" >/dev/null
+{
+  "dns": {
+    "servers": [
+      {"tag":"cloudflare","type":"udp","server":"1.1.1.1"},
+      {"tag":"google","type":"udp","server":"8.8.8.8"}
+    ]
+  },
+  "inbounds": [
+    {
+      "tag":"VLESS",
+      "type":"vless",
+      "listen":"::",
+      "listen_port":443,
+      "users":[{"uuid":"$UUID","flow":"xtls-rprx-vision","short_id":["$SHORTID"]}],
+      "tls":{"enabled":true}
+    }
+  ],
+  "outbounds":[{"tag":"direct","type":"direct"}],
+  "route":{"final":"direct"},
+  "log":{"disabled":false,"level":"info","timestamp":true}
+}
+EOF
+
+    sudo chown "$SING_BOX_USER:$SING_BOX_USER" "$CONFIG_FILE"
+    sudo chmod 600 "$CONFIG_FILE"
+}
+
+# ===================== 设置 systemd 自动启动 =====================
+setup_systemd() {
+    if [ ! -f /etc/systemd/system/sing-box.service ]; then
+        log "创建 systemd 服务..."
+        cat <<'EOT' | sudo tee /etc/systemd/system/sing-box.service >/dev/null
+[Unit]
+Description=sing-box service
+After=network.target
+
+[Service]
+Type=simple
+User=sing-box
+Group=sing-box
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOT
+        sudo systemctl daemon-reload
+        sudo systemctl enable sing-box
+    fi
+    sudo systemctl restart sing-box
+}
+
+# ===================== 主函数 =====================
+main() {
+    check_sudo
+    fix_hostname
+    check_network
+    check_apt
+    install_sing_box
+    setup_user_dir
+    generate_config
+    setup_systemd
+    log_success "sing-box 安装完成并已启动，配置位于 $CONFIG_FILE"
+}
+
 main
