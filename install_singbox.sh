@@ -14,8 +14,7 @@ SOURCES_FILE="/etc/apt/sources.list.d/sagernet.sources"
 SING_BOX_USER="sing-box"
 CONFIG_FILE="/etc/sing-box/config.json"
 
-# ===================== 日志函数 =====================
-log()   { echo -e "${CYAN}[INFO] $1${NC}"; }
+log() { echo -e "${CYAN}[INFO] $1${NC}"; }
 log_success() { echo -e "${GREEN}[SUCCESS] $1${NC}"; }
 log_warn() { echo -e "${YELLOW}[WARN] $1${NC}"; }
 log_error() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
@@ -52,7 +51,6 @@ check_apt() {
 
 # ===================== 安装 sing-box =====================
 install_sing_box() {
-    # 添加 GPG Key
     sudo mkdir -p /etc/apt/keyrings
     if [ ! -f "$GPG_KEY_PATH" ]; then
         log "下载 GPG Key..."
@@ -60,7 +58,6 @@ install_sing_box() {
         sudo chmod a+r "$GPG_KEY_PATH"
     fi
 
-    # 添加 apt 源
     if [ ! -f "$SOURCES_FILE" ]; then
         log "配置 apt 源..."
         echo "Types: deb
@@ -71,9 +68,7 @@ Enabled: yes
 Signed-By: $GPG_KEY_PATH" | sudo tee "$SOURCES_FILE" >/dev/null
     fi
 
-    # 更新 apt
     sudo apt-get update -qq
-    # 安装 sing-box
     sudo apt-get install -y sing-box
 }
 
@@ -90,30 +85,49 @@ setup_user_dir() {
     done
 }
 
-# ===================== 生成 config.json =====================
+# ===================== 生成配置 =====================
 generate_config() {
-    log "生成最新 config.json ..."
-    # 随机 UUID
+    log "生成最新版 config.json ..."
+
+    # 随机生成密码/UUID
     UUID=$(sing-box generate uuid)
-    # 随机 short-id
-    SHORTID=$(head /dev/urandom | tr -dc a-f0-9 | head -c 8)
+    SS_PASS=$(head /dev/urandom | tr -dc a-zA-Z0-9 | head -c 16)
+    HYSTERIA_PASS=$(head /dev/urandom | tr -dc a-zA-Z0-9 | head -c 16)
 
     cat <<EOF | sudo tee "$CONFIG_FILE" >/dev/null
 {
   "dns": {
-    "servers": [
+    "servers":[
       {"tag":"cloudflare","type":"udp","server":"1.1.1.1"},
       {"tag":"google","type":"udp","server":"8.8.8.8"}
     ]
   },
-  "inbounds": [
+  "inbounds":[
     {
       "tag":"VLESS",
       "type":"vless",
       "listen":"::",
       "listen_port":443,
-      "users":[{"uuid":"$UUID","flow":"xtls-rprx-vision","short_id":["$SHORTID"]}],
+      "users":[{"uuid":"$UUID","flow":"xtls-rprx-vision"}],
       "tls":{"enabled":true}
+    },
+    {
+      "tag":"SS",
+      "type":"shadowsocks",
+      "listen":"::",
+      "listen_port":80,
+      "method":"2022-blake3-aes-128-gcm",
+      "password":"$SS_PASS",
+      "multiplex":{"enabled":true}
+    },
+    {
+      "tag":"HYSTERIA2",
+      "type":"hysteria2",
+      "listen":"::",
+      "listen_port":61,
+      "obfs":{"type":"salamander","password":"$HYSTERIA_PASS"},
+      "users":[{"password":"$HYSTERIA_PASS"}],
+      "tls":{"enabled":true,"alpn":["h3"],"certificate_path":".crt","key_path":".key"}
     }
   ],
   "outbounds":[{"tag":"direct","type":"direct"}],
@@ -126,7 +140,7 @@ EOF
     sudo chmod 600 "$CONFIG_FILE"
 }
 
-# ===================== 设置 systemd 自动启动 =====================
+# ===================== systemd =====================
 setup_systemd() {
     if [ ! -f /etc/systemd/system/sing-box.service ]; then
         log "创建 systemd 服务..."
