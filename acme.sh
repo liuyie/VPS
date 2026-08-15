@@ -2,7 +2,7 @@
 #
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 + 每日自检 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  方式：DNS-01 验证，无需80端口，兼容sing-box占用80端口
+#  DNS-01验证｜交互式输入CF密钥，不硬编码｜兼容sing-box占用80端口
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -10,14 +10,11 @@ trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033
 # --- ANSI 颜色 ---
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BOLD='\033[1m'; RESET='\033[0m'
 
-# ===================== 【请修改这里！】 =====================
-CF_EMAIL="你的Cloudflare登录邮箱"
-CF_GLOBAL_KEY="你的Cloudflare全局API密钥"
-# ==========================================================
-
 # --- 全局变量 ---
 DOMAIN=""
 EMAIL=""
+CF_EMAIL=""
+CF_GLOBAL_KEY=""
 CA_SERVER="letsencrypt.org"
 OS_TYPE=""
 PKG_MANAGER=""
@@ -42,10 +39,15 @@ get_user_input() {
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
         echo -e "${RED}❌ 域名格式不正确！${RESET}" >&2; exit 1
     fi
-    read -r -p "请输入邮箱(接收证书通知): " EMAIL
+
+    read -r -p "请输入证书通知邮箱: " EMAIL
     if ! [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
         echo -e "${RED}❌ 邮箱格式不正确！${RESET}" >&2; exit 1
     fi
+
+    read -r -p "请输入 Cloudflare 登录邮箱: " CF_EMAIL
+    read -r -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
+
     echo -e "${GREEN}✅ 用户信息收集完成。${RESET}"
 }
 
@@ -78,13 +80,15 @@ configure_firewall() {
         ufw enable >/dev/null 2>&1 || true
         ufw allow "$ssh_port"/tcp comment 'SSH' >/dev/null 2>&1
         ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1
+        ufw allow 443/udp comment 'HY2 UDP' >/dev/null 2>&1
     else
         systemctl start firewalld >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port="$ssh_port"/tcp --permanent >/dev/null 2>&1
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1
+        firewall-cmd --zone=public --add-port=443/udp --permanent >/dev/null 2>&1
         firewall-cmd --reload >/dev/null 2>&1
     fi
-    echo -e "${GREEN}✅ 防火墙端口配置完成（仅放行SSH+443，无需80）。${RESET}"
+    echo -e "${GREEN}✅ 防火墙端口配置完成（仅放行SSH+443 TCP/UDP，无需80）。${RESET}"
 }
 
 download_acme() {
@@ -116,7 +120,6 @@ issue_cert() {
     mkdir -p "$CERT_KEY_DIR" >/dev/null 2>&1 || true
     echo -e "${YELLOW}➡️ DNS-01 申请ECC证书: $DOMAIN${RESET}"
 
-    # 导入CF API环境变量
     export CF_Email="$CF_EMAIL"
     export CF_Key="$CF_GLOBAL_KEY"
 
@@ -141,15 +144,15 @@ install_cert() {
 }
 
 # =====================
-# 设置 Cron 任务
+# 设置 Cron 自动续期
 # =====================
 setup_cron() {
     echo -e "${YELLOW}➡️ 配置每日自动续期任务${RESET}"
-    # 清理旧acme cron
+    # 清理旧acme相关定时任务
     crontab -l -u root 2>/dev/null | grep -v "$ACME_CMD" | crontab -u root - 2>/dev/null || true
 
-    # 每日0点自动执行acme.sh原生续期(DNS-01)
-    local cron_job="0 0 * * * export CF_Email=$CF_EMAIL;export CF_Key=$CF_GLOBAL_KEY;$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
+    # cron 内注入CF环境变量，保证续期正常执行DNS验证
+    local cron_job="0 0 * * * export CF_Email=${CF_EMAIL};export CF_Key=${CF_GLOBAL_KEY};$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
     (crontab -l -u root 2>/dev/null; echo "$cron_job") | crontab -u root -
     echo -e "${GREEN}✅ Cron 配置完成，日志: $LOG_FILE${RESET}"
 }
