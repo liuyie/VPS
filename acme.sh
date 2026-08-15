@@ -3,6 +3,7 @@
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
 #  DNS-01验证｜交互式输入CF密钥(明文显示方便校验)｜不硬编码密钥｜兼容sing-box占用80端口
+#  修复：ufw enable交互阻塞问题
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -46,7 +47,6 @@ get_user_input() {
     fi
 
     read -r -p "请输入 Cloudflare 登录邮箱: " CF_EMAIL
-    # 移除 -s，密钥明文显示，方便检查
     read -r -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
 
     echo -e "${GREEN}✅ 用户信息收集完成。${RESET}"
@@ -78,7 +78,8 @@ configure_firewall() {
     read -r -p "请输入 SSH 端口 (默认 22): " ssh_port
     ssh_port=${ssh_port:-22}
     if [[ "$OS_TYPE" == "ubuntu" || "$OS_TYPE" == "debian" ]]; then
-        ufw enable >/dev/null 2>&1 || true
+        # 非交互自动确认启用ufw，解决脚本卡死
+        echo y | ufw enable >/dev/null 2>&1 || true
         ufw allow "$ssh_port"/tcp comment 'SSH' >/dev/null 2>&1
         ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1
         ufw allow 443/udp comment 'HY2 UDP' >/dev/null 2>&1
