@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # ==============================================================================
-#  HY2 证书申请 + 自动续期 + 每日自检 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  DNS-01验证｜交互式输入CF密钥，不硬编码｜兼容sing-box占用80端口
+#  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
+#  DNS-01验证｜交互式输入CF密钥(隐藏输入)｜不硬编码密钥｜兼容sing-box占用80端口
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -46,7 +46,9 @@ get_user_input() {
     fi
 
     read -r -p "请输入 Cloudflare 登录邮箱: " CF_EMAIL
-    read -r -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
+    # 密钥隐藏输入
+    read -r -s -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
+    echo ""
 
     echo -e "${GREEN}✅ 用户信息收集完成。${RESET}"
 }
@@ -119,6 +121,7 @@ issue_cert() {
     CERT_KEY_DIR="/etc/ssl/$DOMAIN"
     mkdir -p "$CERT_KEY_DIR" >/dev/null 2>&1 || true
     echo -e "${YELLOW}➡️ DNS-01 申请ECC证书: $DOMAIN${RESET}"
+    echo -e "${YELLOW}ℹ️ 正在添加DNS TXT记录，等待DNS传播，请耐心等待...${RESET}"
 
     export CF_Email="$CF_EMAIL"
     export CF_Key="$CF_GLOBAL_KEY"
@@ -127,8 +130,7 @@ issue_cert() {
         -d "$DOMAIN" \
         --dns dns_cf \
         --server "$CA_SERVER" \
-        --keylength ec-256 \
-        --force
+        --keylength ec-256
     echo -e "${GREEN}✅ 证书申请完成！${RESET}"
 }
 
@@ -151,8 +153,8 @@ setup_cron() {
     # 清理旧acme相关定时任务
     crontab -l -u root 2>/dev/null | grep -v "$ACME_CMD" | crontab -u root - 2>/dev/null || true
 
-    # cron 内注入CF环境变量，保证续期正常执行DNS验证
-    local cron_job="0 0 * * * export CF_Email=${CF_EMAIL};export CF_Key=${CF_GLOBAL_KEY};$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
+    # 变量增加双引号，防止特殊字符解析错误
+    local cron_job="0 0 * * * export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"${CF_GLOBAL_KEY}\";$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
     (crontab -l -u root 2>/dev/null; echo "$cron_job") | crontab -u root -
     echo -e "${GREEN}✅ Cron 配置完成，日志: $LOG_FILE${RESET}"
 }
@@ -176,6 +178,6 @@ echo "==============================================="
 echo -e "${GREEN}✅ 脚本执行完毕${RESET}"
 echo -e "${GREEN}证书文件: ${CERT_KEY_DIR}/${DOMAIN}.crt${RESET}"
 echo -e "${GREEN}私钥文件: ${CERT_KEY_DIR}/${DOMAIN}.key${RESET}"
-echo -e "${GREEN}自动续期任务已配置，全程无需80端口、无需重启sing-box${RESET}"
+echo -e "${GREEN}自动续期任务已配置（无需80端口，续期成功自动重启sing-box）${RESET}"
 echo "==============================================="
 exit 0
