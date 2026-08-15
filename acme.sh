@@ -2,7 +2,7 @@
 #
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  DNS-01验证｜交互式输入CF密钥(隐藏输入)｜不硬编码密钥｜兼容sing-box占用80端口
+#  DNS-01验证｜交互式输入CF密钥(明文显示方便校验)｜不硬编码密钥｜兼容sing-box占用80端口
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -46,9 +46,8 @@ get_user_input() {
     fi
 
     read -r -p "请输入 Cloudflare 登录邮箱: " CF_EMAIL
-    # 密钥隐藏输入
-    read -r -s -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
-    echo ""
+    # 移除 -s，密钥明文显示，方便检查
+    read -r -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
 
     echo -e "${GREEN}✅ 用户信息收集完成。${RESET}"
 }
@@ -184,6 +183,6 @@ echo -e "${BOLD}👉 查询证书到期时间命令：${RESET}"
 echo -e "${YELLOW}openssl x509 -in ${CERT_KEY_DIR}/${DOMAIN}.crt -noout -dates${RESET}"
 echo ""
 echo -e "${BOLD}👉 强制重新签发证书命令（证书异常时使用）：${RESET}"
-echo -e "${YELLOW}export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"你的CF密钥\";acme.sh --issue -d ${DOMAIN} --dns dns_cf --keylength ec-256 --force${RESET}"
+echo -e "${YELLOW}export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"${CF_GLOBAL_KEY}\";acme.sh --issue -d ${DOMAIN} --dns dns_cf --keylength ec-256 --force${RESET}"
 echo "==============================================="
 exit 0
