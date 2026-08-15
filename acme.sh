@@ -2,7 +2,7 @@
 #
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  DNS-01验证｜密钥明文输入方便校验｜修复ufw交互阻塞｜无需人工交互
+#  DNS-01验证｜密钥明文输入方便校验｜ufw防阻塞｜增加--force支持覆盖已有域名
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -74,10 +74,9 @@ install_dependencies() {
 }
 
 configure_firewall() {
-    read -r -p "请输入 SSH 端口 (默认 22): " ssh_port
-    ssh_port=${ssh_port:-22}
+    read -r -p "请输入 SSH 端口 (默认 6122): " ssh_port
+    ssh_port=${ssh_port:-6122}
     if [[ "$OS_TYPE" == "ubuntu" || "$OS_TYPE" == "debian" ]]; then
-        # 先判断ufw状态，仅未启用时执行启用，配合自动应答，彻底防止交互阻塞
         if ! ufw status | grep -q "active"; then
             echo y | ufw enable >/dev/null 2>&1 || true
         fi
@@ -131,7 +130,8 @@ issue_cert() {
         -d "$DOMAIN" \
         --dns dns_cf \
         --server "$CA_SERVER" \
-        --keylength ec-256
+        --keylength ec-256 \
+        --force
     echo -e "${GREEN}✅ 证书申请完成！${RESET}"
 }
 
