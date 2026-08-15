@@ -2,12 +2,13 @@
 #
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  DNS-01验证｜密钥明文输入方便校验｜ufw防阻塞｜增加--force支持覆盖已有域名
+# 更新：签发前自动清理旧域名记录，彻底解决domain.key交互式阻塞报错
+# DNS-01验证｜密钥明文输入｜ufw非交互
 # ==============================================================================
 set -eEuo pipefail
-trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
+trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 发生错误\033[0m" >&2; exit 1' ERR
 
-# --- ANSI 颜色 ---
+# --- ANSI 颜色定义 ---
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BOLD='\033[1m'; RESET='\033[0m'
 
 # --- 全局变量 ---
@@ -74,8 +75,8 @@ install_dependencies() {
 }
 
 configure_firewall() {
-    read -r -p "请输入 SSH 端口 (默认 6122): " ssh_port
-    ssh_port=${ssh_port:-6122}
+    read -r -p "请输入 SSH 端口 (默认 22): " ssh_port
+    ssh_port=${ssh_port:-22}
     if [[ "$OS_TYPE" == "ubuntu" || "$OS_TYPE" == "debian" ]]; then
         if ! ufw status | grep -q "active"; then
             echo y | ufw enable >/dev/null 2>&1 || true
@@ -120,6 +121,16 @@ update_acme() {
 issue_cert() {
     CERT_KEY_DIR="/etc/ssl/$DOMAIN"
     mkdir -p "$CERT_KEY_DIR" >/dev/null 2>&1 || true
+
+    # 自动清理旧域名缓存，解决Domain key exists交互询问
+    local DOMAIN_CACHE_DIR="${ACME_INSTALL_PATH}/${DOMAIN}"
+    if [ -d "$DOMAIN_CACHE_DIR" ]; then
+        echo -e "${YELLOW}➡️ 检测到旧域名缓存，自动清理 $DOMAIN${RESET}"
+        "$ACME_CMD" --remove -d "$DOMAIN" >/dev/null 2>&1 || true
+        rm -rf "$DOMAIN_CACHE_DIR"
+        echo -e "${GREEN}✅ 旧域名记录清理完毕${RESET}"
+    fi
+
     echo -e "${YELLOW}➡️ DNS-01 申请ECC证书: $DOMAIN${RESET}"
     echo -e "${YELLOW}ℹ️ 正在添加DNS TXT记录，等待DNS传播，请耐心等待...${RESET}"
 
@@ -130,8 +141,7 @@ issue_cert() {
         -d "$DOMAIN" \
         --dns dns_cf \
         --server "$CA_SERVER" \
-        --keylength ec-256 \
-        --force
+        --keylength ec-256
     echo -e "${GREEN}✅ 证书申请完成！${RESET}"
 }
 
@@ -146,9 +156,6 @@ install_cert() {
     echo -e "${GREEN}✅ 证书安装完成。${RESET}"
 }
 
-# =====================
-# 设置 Cron 自动续期
-# =====================
 setup_cron() {
     echo -e "${YELLOW}➡️ 配置每日自动续期任务${RESET}"
     crontab -l -u root 2>/dev/null | grep -v "$ACME_CMD" | crontab -u root - 2>/dev/null || true
@@ -181,8 +188,5 @@ echo -e "${GREEN}自动续期任务已配置（无需80端口，续期成功自�
 echo ""
 echo -e "${BOLD}👉 查询证书到期时间命令：${RESET}"
 echo -e "${YELLOW}openssl x509 -in ${CERT_KEY_DIR}/${DOMAIN}.crt -noout -dates${RESET}"
-echo ""
-echo -e "${BOLD}👉 强制重新签发证书命令（证书异常时使用）：${RESET}"
-echo -e "${YELLOW}export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"${CF_GLOBAL_KEY}\";acme.sh --issue -d ${DOMAIN} --dns dns_cf --keylength ec-256 --force${RESET}"
 echo "==============================================="
 exit 0
