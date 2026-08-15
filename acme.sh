@@ -1,192 +1,331 @@
 #!/bin/bash
 #
 # ==============================================================================
-#  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-# 更新：签发前自动清理旧域名记录，彻底解决domain.key交互式阻塞报错
-# DNS-01验证｜密钥明文输入｜ufw非交互
+# HY2 证书申请 + 自动续期
+# Debian/Ubuntu + sing-box + acme.sh + Cloudflare DNS-01
+#
+# Cloudflare API Token版
+# 无CF_ZONE_ID
+# 自动清理旧域名缓存，解决 Domain key exists
 # ==============================================================================
+
 set -eEuo pipefail
-trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 发生错误\033[0m" >&2; exit 1' ERR
 
-# --- ANSI 颜色定义 ---
-RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BOLD='\033[1m'; RESET='\033[0m'
+trap 'echo -e "\033[31m❌ 错误位置: ${BASH_SOURCE}:${LINENO}\033[0m"' ERR
 
-# --- 全局变量 ---
+
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RESET="\033[0m"
+
+
 DOMAIN=""
 EMAIL=""
-CF_EMAIL=""
-CF_GLOBAL_KEY=""
-CA_SERVER="letsencrypt.org"
-OS_TYPE=""
-PKG_MANAGER=""
-ACME_INSTALL_PATH="/root/.acme.sh"
-CERT_KEY_DIR=""
-ACME_CMD=""
-LOG_FILE="/root/acme_renew.log"
+CF_TOKEN=""
 
-# =====================
-# --- 核心函数 ---
-# =====================
+ACME_HOME="/root/.acme.sh"
+ACME_CMD="${ACME_HOME}/acme.sh"
 
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}❌ 请使用 root 权限运行此脚本。${RESET}" >&2; exit 1
-    fi
-    echo -e "${GREEN}✅ Root 权限检查通过。${RESET}"
+CERT_DIR=""
+
+
+# ======================
+# root检查
+# ======================
+
+check_root()
+{
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}请使用root运行${RESET}"
+    exit 1
+fi
+
+echo -e "${GREEN}Root OK${RESET}"
+
 }
 
-get_user_input() {
-    read -r -p "请输入域名(例如 vip.23456.xyz): " DOMAIN
-    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-        echo -e "${RED}❌ 域名格式不正确！${RESET}" >&2; exit 1
-    fi
 
-    read -r -p "请输入证书通知邮箱: " EMAIL
-    if ! [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        echo -e "${RED}❌ 邮箱格式不正确！${RESET}" >&2; exit 1
-    fi
 
-    read -r -p "请输入 Cloudflare 登录邮箱: " CF_EMAIL
-    read -r -p "请输入 Cloudflare 全局API密钥: " CF_GLOBAL_KEY
+# ======================
+# 输入参数
+# ======================
 
-    echo -e "${GREEN}✅ 用户信息收集完成。${RESET}"
+input_info()
+{
+
+read -rp "请输入域名: " DOMAIN
+
+
+if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    echo "域名格式错误"
+    exit 1
+fi
+
+
+read -rp "请输入通知邮箱: " EMAIL
+
+
+read -rsp "请输入 Cloudflare API Token: " CF_TOKEN
+echo
+
+
+echo -e "${GREEN}参数输入完成${RESET}"
+
 }
 
-detect_os() {
-    if grep -qi "ubuntu" /etc/os-release; then OS_TYPE="ubuntu"; PKG_MANAGER="apt"
-    elif grep -qi "debian" /etc/os-release; then OS_TYPE="debian"; PKG_MANAGER="apt"
-    elif grep -qi "centos" /etc/os-release; then OS_TYPE="centos"; PKG_MANAGER="yum"
-    elif grep -qi "rhel" /etc/os-release; then OS_TYPE="rhel"; PKG_MANAGER="yum"
-    else echo -e "${RED}❌ 不支持的操作系统${RESET}" >&2; exit 1; fi
-    echo -e "${GREEN}✅ 检测到系统: $OS_TYPE ($PKG_MANAGER)${RESET}"
+
+
+# ======================
+# 安装依赖
+# ======================
+
+install_pkg()
+{
+
+apt update -y
+
+apt install -y \
+curl \
+openssl \
+cron \
+ufw
+
+
+echo -e "${GREEN}依赖安装完成${RESET}"
+
 }
 
-install_dependencies() {
-    local deps=("curl" "cron" "ufw" "openssl")
-    echo -e "${YELLOW}➡️ 安装依赖...${RESET}"
-    for pkg in "${deps[@]}"; do
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            dpkg -s "$pkg" &>/dev/null || { apt update -y >/dev/null 2>&1; apt install -y "$pkg" >/dev/null 2>&1; }
-        else
-            rpm -q "$pkg" &>/dev/null || yum install -y "$pkg" >/dev/null 2>&1
-        fi
-    done
-    echo -e "${GREEN}✅ 依赖安装完成。${RESET}"
+
+
+# ======================
+# 防火墙
+# ======================
+
+firewall()
+{
+
+read -rp "SSH端口(默认22): " SSH_PORT
+
+SSH_PORT=${SSH_PORT:-22}
+
+
+ufw allow ${SSH_PORT}/tcp comment SSH
+
+ufw allow 443/tcp comment HTTPS
+
+ufw allow 443/udp comment HY2
+
+
+if ! ufw status | grep -q active
+then
+    echo y | ufw enable
+fi
+
+
+ufw reload >/dev/null 2>&1 || true
+
+
+echo -e "${GREEN}防火墙配置完成${RESET}"
+
 }
 
-configure_firewall() {
-    read -r -p "请输入 SSH 端口 (默认 22): " ssh_port
-    ssh_port=${ssh_port:-22}
-    if [[ "$OS_TYPE" == "ubuntu" || "$OS_TYPE" == "debian" ]]; then
-        if ! ufw status | grep -q "active"; then
-            echo y | ufw enable >/dev/null 2>&1 || true
-        fi
-        ufw allow "$ssh_port"/tcp comment 'SSH' >/dev/null 2>&1
-        ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1
-        ufw allow 443/udp comment 'HY2 UDP' >/dev/null 2>&1
-    else
-        systemctl start firewalld >/dev/null 2>&1 || true
-        firewall-cmd --zone=public --add-port="$ssh_port"/tcp --permanent >/dev/null 2>&1
-        firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1
-        firewall-cmd --zone=public --add-port=443/udp --permanent >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-    fi
-    echo -e "${GREEN}✅ 防火墙端口配置完成（仅放行SSH+443 TCP/UDP，无需80）。${RESET}"
+
+
+# ======================
+# 安装acme.sh
+# ======================
+
+install_acme()
+{
+
+
+if [ ! -f "$ACME_CMD" ]; then
+
+curl https://get.acme.sh | sh -s email="$EMAIL"
+
+fi
+
+
+$ACME_CMD --upgrade
+
+
+echo -e "${GREEN}acme.sh安装完成${RESET}"
+
 }
 
-download_acme() {
-    if [ ! -d "$ACME_INSTALL_PATH" ]; then
-        curl -fsSL https://get.acme.sh | sh -s -- home "$ACME_INSTALL_PATH"
-        echo -e "${GREEN}✅ acme.sh 下载完成。${RESET}"
-    else
-        echo -e "${YELLOW}ℹ️ acme.sh 已安装，跳过下载。${RESET}"
-    fi
+
+
+# ======================
+# Cloudflare Token配置
+# ======================
+
+config_cf()
+{
+
+
+touch "$ACME_HOME/account.conf"
+
+
+cat >> "$ACME_HOME/account.conf" <<EOF
+
+export CF_Token="${CF_TOKEN}"
+
+EOF
+
+
+chmod 600 "$ACME_HOME/account.conf"
+
+
+echo -e "${GREEN}Cloudflare Token配置完成${RESET}"
+
 }
 
-find_acme_cmd() {
-    if [ -x "$ACME_INSTALL_PATH/acme.sh" ]; then ACME_CMD="$ACME_INSTALL_PATH/acme.sh"
-    else ACME_CMD=$(command -v acme.sh); fi
-    if [ -z "$ACME_CMD" ] || [ ! -x "$ACME_CMD" ]; then
-        echo -e "${RED}❌ 找不到 acme.sh${RESET}" >&2; exit 1
-    fi
-    echo -e "${GREEN}✅ 找到 acme.sh: $ACME_CMD${RESET}"
+
+
+# ======================
+# 申请证书
+# ======================
+
+issue_cert()
+{
+
+
+CERT_DIR="/etc/ssl/${DOMAIN}"
+
+mkdir -p "$CERT_DIR"
+
+
+echo -e "${YELLOW}清理旧域名缓存${RESET}"
+
+
+$ACME_CMD --remove -d "$DOMAIN" >/dev/null 2>&1 || true
+
+
+rm -rf "${ACME_HOME}/${DOMAIN}_ecc"
+
+rm -rf "${ACME_HOME}/${DOMAIN}"
+
+
+echo -e "${YELLOW}"
+echo "开始申请ECC证书:"
+echo "$DOMAIN"
+echo -e "${RESET}"
+
+
+export CF_Token="$CF_TOKEN"
+
+
+$ACME_CMD \
+--issue \
+-d "$DOMAIN" \
+--dns dns_cf \
+--server letsencrypt.org \
+--keylength ec-256 \
+--force
+
+
+echo -e "${GREEN}证书申请成功${RESET}"
+
 }
 
-update_acme() {
-    "$ACME_CMD" --upgrade >/dev/null 2>&1 || true
-    "$ACME_CMD" --register-account -m "$EMAIL" >/dev/null 2>&1 || true
-    echo -e "${GREEN}✅ acme.sh 更新&账号注册完成。${RESET}"
+
+
+# ======================
+# 安装证书
+# ======================
+
+install_cert()
+{
+
+
+$ACME_CMD \
+--installcert \
+-d "$DOMAIN" \
+--key-file "${CERT_DIR}/${DOMAIN}.key" \
+--fullchain-file "${CERT_DIR}/${DOMAIN}.crt" \
+--reloadcmd "systemctl restart sing-box"
+
+
+
+chmod 600 "${CERT_DIR}/${DOMAIN}.key"
+
+
+chown root:root "${CERT_DIR}/${DOMAIN}.key"
+
+
+echo -e "${GREEN}证书安装完成${RESET}"
+
 }
 
-issue_cert() {
-    CERT_KEY_DIR="/etc/ssl/$DOMAIN"
-    mkdir -p "$CERT_KEY_DIR" >/dev/null 2>&1 || true
 
-    # 自动清理旧域名缓存，解决Domain key exists交互询问
-    local DOMAIN_CACHE_DIR="${ACME_INSTALL_PATH}/${DOMAIN}"
-    if [ -d "$DOMAIN_CACHE_DIR" ]; then
-        echo -e "${YELLOW}➡️ 检测到旧域名缓存，自动清理 $DOMAIN${RESET}"
-        "$ACME_CMD" --remove -d "$DOMAIN" >/dev/null 2>&1 || true
-        rm -rf "$DOMAIN_CACHE_DIR"
-        echo -e "${GREEN}✅ 旧域名记录清理完毕${RESET}"
-    fi
 
-    echo -e "${YELLOW}➡️ DNS-01 申请ECC证书: $DOMAIN${RESET}"
-    echo -e "${YELLOW}ℹ️ 正在添加DNS TXT记录，等待DNS传播，请耐心等待...${RESET}"
+# ======================
+# 自动续期
+# ======================
 
-    export CF_Email="$CF_EMAIL"
-    export CF_Key="$CF_GLOBAL_KEY"
+cron_setup()
+{
 
-    "$ACME_CMD" --issue \
-        -d "$DOMAIN" \
-        --dns dns_cf \
-        --server "$CA_SERVER" \
-        --keylength ec-256
-    echo -e "${GREEN}✅ 证书申请完成！${RESET}"
+
+systemctl enable cron
+
+systemctl restart cron
+
+
+
+(crontab -l 2>/dev/null | grep -v "acme.sh" || true
+
+echo "0 3 * * * ${ACME_CMD} --cron --home ${ACME_HOME} >> /root/acme_renew.log 2>&1"
+
+) | crontab -
+
+
+
+echo -e "${GREEN}自动续期配置完成${RESET}"
+
 }
 
-install_cert() {
-    echo -e "${YELLOW}➡️ 安装证书到 $CERT_KEY_DIR${RESET}"
-    "$ACME_CMD" --installcert -d "$DOMAIN" \
-        --key-file       "${CERT_KEY_DIR}/${DOMAIN}.key" \
-        --fullchain-file "${CERT_KEY_DIR}/${DOMAIN}.crt" \
-        --reloadcmd "systemctl restart sing-box" >/dev/null 2>&1
-    chmod 600 "${CERT_KEY_DIR}/${DOMAIN}.key"
-    chown root:root "${CERT_KEY_DIR}/${DOMAIN}.key"
-    echo -e "${GREEN}✅ 证书安装完成。${RESET}"
-}
 
-setup_cron() {
-    echo -e "${YELLOW}➡️ 配置每日自动续期任务${RESET}"
-    crontab -l -u root 2>/dev/null | grep -v "$ACME_CMD" | crontab -u root - 2>/dev/null || true
 
-    local cron_job="0 0 * * * export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"${CF_GLOBAL_KEY}\";$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
-    (crontab -l -u root 2>/dev/null; echo "$cron_job") | crontab -u root -
-    echo -e "${GREEN}✅ Cron 配置完成，日志: $LOG_FILE${RESET}"
-}
+# ======================
+# 主流程
+# ======================
 
-# =====================
-# --- 主体流程 ---
-# =====================
 check_root
-get_user_input
-detect_os
-install_dependencies
-configure_firewall
-download_acme
-find_acme_cmd
-update_acme
-issue_cert
-install_cert
-setup_cron
 
-echo "==============================================="
-echo -e "${GREEN}✅ 脚本执行完毕${RESET}"
-echo -e "${GREEN}证书文件: ${CERT_KEY_DIR}/${DOMAIN}.crt${RESET}"
-echo -e "${GREEN}私钥文件: ${CERT_KEY_DIR}/${DOMAIN}.key${RESET}"
-echo -e "${GREEN}自动续期任务已配置（无需80端口，续期成功自动重启sing-box）${RESET}"
-echo ""
-echo -e "${BOLD}👉 查询证书到期时间命令：${RESET}"
-echo -e "${YELLOW}openssl x509 -in ${CERT_KEY_DIR}/${DOMAIN}.crt -noout -dates${RESET}"
-echo "==============================================="
-exit 0
+input_info
+
+install_pkg
+
+firewall
+
+install_acme
+
+config_cf
+
+issue_cert
+
+install_cert
+
+cron_setup
+
+
+
+echo
+echo "======================================"
+echo -e "${GREEN}✅ 全部完成${RESET}"
+echo
+echo "证书:"
+echo "${CERT_DIR}/${DOMAIN}.crt"
+echo
+echo "私钥:"
+echo "${CERT_DIR}/${DOMAIN}.key"
+echo
+echo "检查有效期:"
+echo "openssl x509 -in ${CERT_DIR}/${DOMAIN}.crt -noout -dates"
+echo
+echo "续期日志:"
+echo "/root/acme_renew.log"
+echo "======================================"
