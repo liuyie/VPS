@@ -2,8 +2,7 @@
 #
 # ==============================================================================
 #  HY2 证书申请 + 自动续期 (Debian/Ubuntu sing-box DNS-01 Cloudflare版)
-#  DNS-01验证｜交互式输入CF密钥(明文显示方便校验)｜不硬编码密钥｜兼容sing-box占用80端口
-#  修复：ufw enable交互阻塞问题
+#  DNS-01验证｜密钥明文输入方便校验｜修复ufw交互阻塞｜无需人工交互
 # ==============================================================================
 set -eEuo pipefail
 trap 'echo -e "\033[31m❌ 脚本在 [\033[1m${BASH_SOURCE}:${LINENO}\033[0m\033[31m] 行发生错误\033[0m" >&2; exit 1' ERR
@@ -78,8 +77,10 @@ configure_firewall() {
     read -r -p "请输入 SSH 端口 (默认 22): " ssh_port
     ssh_port=${ssh_port:-22}
     if [[ "$OS_TYPE" == "ubuntu" || "$OS_TYPE" == "debian" ]]; then
-        # 非交互自动确认启用ufw，解决脚本卡死
-        echo y | ufw enable >/dev/null 2>&1 || true
+        # 先判断ufw状态，仅未启用时执行启用，配合自动应答，彻底防止交互阻塞
+        if ! ufw status | grep -q "active"; then
+            echo y | ufw enable >/dev/null 2>&1 || true
+        fi
         ufw allow "$ssh_port"/tcp comment 'SSH' >/dev/null 2>&1
         ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1
         ufw allow 443/udp comment 'HY2 UDP' >/dev/null 2>&1
@@ -150,10 +151,8 @@ install_cert() {
 # =====================
 setup_cron() {
     echo -e "${YELLOW}➡️ 配置每日自动续期任务${RESET}"
-    # 清理旧acme相关定时任务
     crontab -l -u root 2>/dev/null | grep -v "$ACME_CMD" | crontab -u root - 2>/dev/null || true
 
-    # 变量增加双引号，防止特殊字符解析错误
     local cron_job="0 0 * * * export CF_Email=\"${CF_EMAIL}\";export CF_Key=\"${CF_GLOBAL_KEY}\";$ACME_CMD --cron --home $ACME_INSTALL_PATH >> $LOG_FILE 2>&1"
     (crontab -l -u root 2>/dev/null; echo "$cron_job") | crontab -u root -
     echo -e "${GREEN}✅ Cron 配置完成，日志: $LOG_FILE${RESET}"
